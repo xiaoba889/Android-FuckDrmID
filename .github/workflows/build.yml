@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  NDK_VERSION: 27.2.12479018
+  NDK_VERSION: 30.0.16248370
   MODULE_ID: fuckdrmid
   MODULE_NAME: Android FuckDrmID
 
