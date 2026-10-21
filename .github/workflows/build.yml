@@ -1,0 +1,128 @@
+name: Build module
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: 27.2.12479018
+  MODULE_ID: fuckdrmid
+  MODULE_NAME: Android FuckDrmID
+
+jobs:
+  build:
+    name: Build arm64 module
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
+
+      - name: Build native library
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}/ndk-build" \
+            NDK_PROJECT_PATH="${GITHUB_WORKSPACE}" \
+            APP_BUILD_SCRIPT="${GITHUB_WORKSPACE}/Android.mk" \
+            NDK_APPLICATION_MK="${GITHUB_WORKSPACE}/Application.mk" \
+            NDK_OUT="${GITHUB_WORKSPACE}/build/obj" \
+            NDK_LIBS_OUT="${GITHUB_WORKSPACE}/build/libs" \
+            NDK_DEBUG=0 \
+            -j"$(nproc)"
+
+          test -s build/libs/arm64-v8a/libdrmid.so
+          file build/libs/arm64-v8a/libdrmid.so
+
+      - name: Package Magisk and Zygisk Next module
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::7}"
+          version_code="${GITHUB_RUN_NUMBER}"
+          version="ci-${version_code}-${short_sha}"
+          package_name="Android-FuckDrmID-${version}.zip"
+          module_dir="${GITHUB_WORKSPACE}/build/module"
+
+          rm -rf "${module_dir}"
+          mkdir -p "${module_dir}"
+
+          install -m 0644 build/libs/arm64-v8a/libdrmid.so "${module_dir}/libdrmid.so"
+
+          cat > "${module_dir}/module.prop" <<EOF
+          id=${MODULE_ID}
+          name=${MODULE_NAME}
+          version=${version}
+          versionCode=${version_code}
+          author=jamlops / xiaoba889
+          description=Injects the Widevine DRM service through Zygisk Next to change the local Widevine identifier. arm64-v8a only.
+          EOF
+
+          cat > "${module_dir}/zn_modules.txt" <<'EOF'
+          name=android.hardware.drm-service.widevine libdrmid.so
+          EOF
+
+          touch "${module_dir}/skip_mount"
+
+          cat > "${module_dir}/customize.sh" <<'EOF'
+          if [ "$ARCH" != "arm64" ]; then
+            abort "! This module only supports arm64-v8a devices."
+          fi
+
+          ui_print "- Android FuckDrmID"
+          ui_print "- Requires Zygisk Next and Zygisk Next Linker"
+          set_perm "$MODPATH/libdrmid.so" 0 0 0644
+          set_perm "$MODPATH/zn_modules.txt" 0 0 0644
+          EOF
+
+          (
+            cd "${module_dir}"
+            zip -9 -r "${GITHUB_WORKSPACE}/${package_name}" .
+          )
+
+          sha256sum "${package_name}" | tee "${package_name}.sha256"
+          unzip -l "${package_name}"
+
+          echo "package_name=${package_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-FuckDrmID
+          path: |
+            ${{ steps.package.outputs.package_name }}
+            ${{ steps.package.outputs.package_name }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
+        shell: bash
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "${PACKAGE_NAME}" "${PACKAGE_NAME}.sha256" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
